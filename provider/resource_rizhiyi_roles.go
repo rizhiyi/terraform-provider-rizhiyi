@@ -1,8 +1,11 @@
 package provider
 
 import (
+	"encoding/json"
+	"io"
 	"github.com/hashicorp/terraform-plugin-sdk/helper/schema"
 	"terraform-provider-rizhiyi/yottaweb"
+	"strconv"
 )
 
 func resourceRoles() *schema.Resource {
@@ -42,42 +45,87 @@ func resourceRolesCreate(d *schema.ResourceData, m interface{}) error {
 		"memo": memo,
 	}
 	// add request path parameters
-	endpoint := c.BuildRizhiyiURL(nil, "roles")
+	endpoint := c.BuildRizhiyiURL(nil, "v3", "roles")
 	resp, err := c.Post(endpoint, requestBody)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-	app_id, _ := c.GetResourceIdByName(name, "roles")
-	d.Set("app_id", app_id)
-	d.SetId(name)
-	return nil
+
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	var respData map[string]interface{}
+	if err := json.Unmarshal(bodyBytes, &respData); err == nil {
+		if obj, ok := respData["object"]; ok {
+			switch v := obj.(type) {
+			case float64:
+				d.SetId(strconv.Itoa(int(v)))
+			case map[string]interface{}:
+				if idv, ok := v["id"]; ok {
+					switch iv := idv.(type) {
+					case float64:
+						d.SetId(strconv.Itoa(int(iv)))
+					case string:
+						d.SetId(iv)
+					case int:
+						d.SetId(strconv.Itoa(iv))
+					default:
+						d.SetId("")
+					}
+				}
+			case string:
+				d.SetId(v)
+			}
+		}
+	}
+	if d.Id() == "" {
+		if rid, _ := c.GetResourceIdByName(name, "v3", "roles"); rid != "" {
+			d.SetId(rid)
+		}
+	}
+	return resourceRolesRead(d, m)
 
 }
 
 func resourceRolesRead(d *schema.ResourceData, m interface{}) error {
 	c := m.(*yottaweb.Client)
-	name := d.Id()
-	if name == "" {
-		if v, ok := d.GetOk("name"); ok {
-			name = v.(string)
+	id := d.Id()
+	// 如果当前 state 的 ID 是 name（非纯数字），尝试按 name 解析出数值 id
+	if id != "" {
+		if _, err := strconv.Atoi(id); err != nil {
+			if rid, _ := c.GetResourceIdByName(id, "v3", "roles"); rid != "" {
+				id = rid
+				d.SetId(id)
+			} else {
+				// 再尝试从属性 name 获取
+				if v, ok := d.GetOk("name"); ok {
+					if rid2, _ := c.GetResourceIdByName(v.(string), "v3", "roles"); rid2 != "" {
+						id = rid2
+						d.SetId(id)
+					}
+				}
+			}
 		}
 	}
-	if name == "" {
+	if id == "" {
+		if v, ok := d.GetOk("name"); ok {
+			if rid, _ := c.GetResourceIdByName(v.(string), "v3", "roles"); rid != "" {
+				id = rid
+				d.SetId(id)
+			}
+		}
+	}
+	if id == "" {
 		d.SetId("")
 		return nil
 	}
 
-	appID, err := c.GetResourceIdByName(name, "roles")
+	data, err := c.GetResourceById(id, "v3", "roles")
 	if err != nil {
 		return err
 	}
-	if appID == "" {
-		d.SetId("")
-		return nil
-	}
 
-	d.Set("app_id", appID)
+	d.Set("name", data["name"])
+	d.Set("memo", data["memo"])
 	return nil
 }
 
@@ -91,8 +139,8 @@ func resourceRolesUpdate(d *schema.ResourceData, m interface{}) error {
 		"memo": memo,
 	}
 
-	update_id, _ := c.GetResourceIdByName(d.Id(), "roles")
-	endpoint := c.BuildRizhiyiURL(nil, "roles", update_id)
+	update_id := d.Id()
+	endpoint := c.BuildRizhiyiURL(nil, "v3", "roles", update_id)
 	resp, err := c.Put(endpoint, requestBody)
 	if err != nil {
 		return err
@@ -100,16 +148,14 @@ func resourceRolesUpdate(d *schema.ResourceData, m interface{}) error {
 
 	defer resp.Body.Close()
 
-	d.SetId(name)
 	return nil
 }
 
 func resourceRolesDelete(d *schema.ResourceData, m interface{}) error {
 	c := m.(*yottaweb.Client)
-	name := d.Get("name").(string)
-	del_id, _ := c.GetResourceIdByName(name, "roles")
+	del_id := d.Id()
 
-	endpoint := c.BuildRizhiyiURL(nil, "roles", del_id)
+	endpoint := c.BuildRizhiyiURL(nil, "v3", "roles", del_id)
 	resp, err := c.Delete(endpoint)
 	if err != nil {
 		return err

@@ -3,6 +3,9 @@ package provider
 import (
 	"github.com/hashicorp/terraform-plugin-sdk/helper/schema"
 	"terraform-provider-rizhiyi/yottaweb"
+	"encoding/json"
+	"io"
+	"strconv"
 )
 
 
@@ -36,8 +39,8 @@ func resourceParserRule() *schema.Resource {
 				Description: "ParserRule ownership type, determines whether it is a system default rule. User-created rules are all assigned a value of 1000. (default value 1000)",
 			},
 
-			"app_ids": &schema.Schema{
-				Type:     schema.TypeString,
+			"app_id": &schema.Schema{
+				Type:     schema.TypeInt,
 				Optional: true,
 				Description: "App ID to which the ParserRule resource belongs.",
 			},
@@ -75,7 +78,7 @@ func resourceParserRuleCreate(d *schema.ResourceData, m interface{}) error {
 	logtype := d.Get("logtype").(string)
 	enable := d.Get("enable").(int)
 	category_id := d.Get("category_id").(int)
-	app_ids := d.Get("app_ids").(string)
+	app_id := d.Get("app_id").(int)
 	rt_names := d.Get("rt_names").(string)
 	assign_data := d.Get("assign_data").([]interface{})
 	conf := d.Get("conf").(string)
@@ -86,45 +89,99 @@ func resourceParserRuleCreate(d *schema.ResourceData, m interface{}) error {
 		"logtype":     logtype,
 		"enable":      enable,
 		"category_id": category_id,
-		"app_ids":     app_ids,
+		"app_id":      app_id,
 		"rt_names":    rt_names,
 		"assign_data": assign_data,
 		"conf":        conf,
 		"event_list":  event_list,
 	}
 
-	endpoint := c.BuildRizhiyiURL(nil, "parserrules")
+	endpoint := c.BuildRizhiyiURL(nil, "v3", "parserrules")
 	resp, err := c.Post(endpoint, requestBody)
 	if err != nil {
 		return err
 	}
 
 	defer resp.Body.Close()
-	d.SetId(name)
-	return nil
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	var respData map[string]interface{}
+	if err := json.Unmarshal(bodyBytes, &respData); err == nil {
+		if obj, ok := respData["object"]; ok {
+			switch v := obj.(type) {
+			case float64:
+				d.SetId(strconv.Itoa(int(v)))
+			case map[string]interface{}:
+				if idv, ok := v["id"]; ok {
+					switch iv := idv.(type) {
+					case float64:
+						d.SetId(strconv.Itoa(int(iv)))
+					case string:
+						d.SetId(iv)
+					case int:
+						d.SetId(strconv.Itoa(iv))
+					default:
+						d.SetId("")
+					}
+				}
+			case string:
+				d.SetId(v)
+			}
+		}
+	}
+	if d.Id() == "" {
+		if rid, _ := c.GetResourceIdByName(name, "v3", "parserrules"); rid != "" {
+			d.SetId(rid)
+		}
+	}
+	return resourceParserRuleRead(d, m)
 }
 
 func resourceParserRuleRead(d *schema.ResourceData, m interface{}) error {
 	c := m.(*yottaweb.Client)
-	name := d.Id()
-	if name == "" {
-		if v, ok := d.GetOk("name"); ok {
-			name = v.(string)
+	id := d.Id()
+	// 如果当前 state 的 ID 是 name（非纯数字），尝试按 name 解析出数值 id
+	if id != "" {
+		if _, err := strconv.Atoi(id); err != nil {
+			if rid, _ := c.GetResourceIdByName(id, "v3", "parserrules"); rid != "" {
+				id = rid
+				d.SetId(id)
+			} else {
+				if v, ok := d.GetOk("name"); ok {
+					if rid2, _ := c.GetResourceIdByName(v.(string), "v3", "parserrules"); rid2 != "" {
+						id = rid2
+						d.SetId(id)
+					}
+				}
+			}
 		}
 	}
-	if name == "" {
+	if id == "" {
+		if v, ok := d.GetOk("name"); ok {
+			if rid, _ := c.GetResourceIdByName(v.(string), "v3", "parserrules"); rid != "" {
+				id = rid
+				d.SetId(id)
+			}
+		}
+	}
+	if id == "" {
 		d.SetId("")
 		return nil
 	}
 
-	appID, err := c.GetResourceIdByName(name, "parserrules")
+	data, err := c.GetResourceById(id, "v3", "parserrules")
 	if err != nil {
 		return err
 	}
-	if appID == "" {
-		d.SetId("")
-		return nil
-	}
+
+	d.Set("name", data["name"])
+	d.Set("logtype", data["logtype"])
+	d.Set("enable", data["enable"])
+	d.Set("category_id", data["category_id"])
+	d.Set("app_id", data["app_id"])
+	d.Set("rt_names", data["rt_names"])
+	d.Set("assign_data", data["assign_data"])
+	d.Set("conf", data["conf"])
+	d.Set("event_list", data["event_list"])
 
 	return nil
 }
@@ -135,7 +192,7 @@ func resourceParserRuleUpdate(d *schema.ResourceData, m interface{}) error {
 	logtype := d.Get("logtype").(string)
 	enable := d.Get("enable").(int)
 	category_id := d.Get("category_id").(int)
-	app_ids := d.Get("app_ids").(string)
+	app_id := d.Get("app_id").(int)
 	rt_names := d.Get("rt_names").(string)
 	assign_data := d.Get("assign_data").([]interface{})
 	conf := d.Get("conf").(string)
@@ -146,15 +203,15 @@ func resourceParserRuleUpdate(d *schema.ResourceData, m interface{}) error {
 		"logtype":     logtype,
 		"enable":      enable,
 		"category_id": category_id,
-		"app_ids":     app_ids,
+		"app_id":      app_id,
 		"rt_names":    rt_names,
 		"assign_data": assign_data,
 		"conf":        conf,
 		"event_list":  event_list,
 	}
 
-	update_id, _ := c.GetResourceIdByName(d.Id(), "parserrules")
-	endpoint := c.BuildRizhiyiURL(nil, "parserrules", update_id)
+	update_id := d.Id()
+	endpoint := c.BuildRizhiyiURL(nil, "v3", "parserrules", update_id)
 	resp, err := c.Put(endpoint, requestBody)
 	if err != nil {
 		return err
@@ -162,19 +219,15 @@ func resourceParserRuleUpdate(d *schema.ResourceData, m interface{}) error {
 
 	defer resp.Body.Close()
 
-	d.SetId(name)
+	// keep numeric id stable
 	return nil
 }
 
 func resourceParserRuleDelete(d *schema.ResourceData, m interface{}) error {
 	c := m.(*yottaweb.Client)
-	name := d.Get("name").(string)
-	del_id, err := c.GetResourceIdByName(name, "parserrules")
-	if err != nil {
-		return err
-	}
+	del_id := d.Id()
 
-	endpoint := c.BuildRizhiyiURL(nil, "parserrules", del_id)
+	endpoint := c.BuildRizhiyiURL(nil, "v3", "parserrules", del_id)
 
 	resp, err := c.Delete(endpoint)
 	if err != nil {

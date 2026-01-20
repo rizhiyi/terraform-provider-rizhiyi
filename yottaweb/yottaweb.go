@@ -61,7 +61,6 @@ func (c *Client) Request(httpMethod, requestUrl string, body io.Reader) (*http.R
 		for _, cookie := range c.HTTPClient.Jar.Cookies(u) {
 			if cookie.Name == "csrftoken" {
 				request.Header.Set("X-CSRFToken", cookie.Value)
-				fmt.Println("Request set X-CSRFToken for", httpMethod, requestUrl)
 				break
 			}
 		}
@@ -132,7 +131,6 @@ func (c *Client) ensureCSRFCookie(requestURL url.URL) {
 	u.RawQuery = ""
 
 	existingCookies := c.HTTPClient.Jar.Cookies(&u)
-	fmt.Println("ensureCSRFCookie before request, url:", u.String(), "cookies:", existingCookies)
 	for _, cookie := range existingCookies {
 		if cookie.Name == "csrftoken" && cookie.Value != "" {
 			return
@@ -153,27 +151,52 @@ func (c *Client) ensureCSRFCookie(requestURL url.URL) {
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 
-	newCookies := c.HTTPClient.Jar.Cookies(&u)
-	fmt.Println("ensureCSRFCookie after request, url:", u.String(), "cookies:", newCookies)
+	_ = c.HTTPClient.Jar.Cookies(&u)
 }
 
 // BuildRizhiyiURL Http request path
 func (c *Client) BuildRizhiyiURL(parametersValues url.Values, urlPathParts ...string) url.URL {
-	buildPath := "/api/v2"
+	buildPath := "/api"
+	
+	// 如果第一个参数不是 "v2" 或 "v3"，则默认添加 "v2"
+	hasVersion := false
+	if len(urlPathParts) > 0 {
+		if urlPathParts[0] == "v2" || urlPathParts[0] == "v3" {
+			hasVersion = true
+		}
+	}
+	
+	if !hasVersion {
+		buildPath = path.Join(buildPath, "v2")
+	}
+
 	for _, pathPart := range urlPathParts {
 		pathPart = strings.ReplaceAll(pathPart, " ", "+")
 		buildPath = path.Join(buildPath, pathPart)
+	}
+	// 确保路径以 / 结尾
+	if !strings.HasSuffix(buildPath, "/") {
 		buildPath = buildPath + "/"
 	}
+
 	httpScheme := getEnv(envVarHTTPScheme, defaultScheme)
 	if parametersValues == nil {
 		parametersValues = url.Values{}
 	}
+	
+	host := c.Host
+	if strings.HasPrefix(host, "http://") {
+		host = strings.TrimPrefix(host, "http://")
+	} else if strings.HasPrefix(host, "https://") {
+		host = strings.TrimPrefix(host, "https://")
+	}
+	host = strings.TrimRight(host, "/")
+
 	// To avoid http response truncation
 	parametersValues.Set("count", "-1")
 	return url.URL{
 		Scheme:   httpScheme,
-		Host:     c.Host,
+		Host:     host,
 		Path:     buildPath,
 		RawQuery: parametersValues.Encode(),
 	}
@@ -181,10 +204,8 @@ func (c *Client) BuildRizhiyiURL(parametersValues url.Values, urlPathParts ...st
 
 // get resource id by name
 
-func (c *Client) GetResourceIdByName(name string, resourceName string) (id string, err error) {
-	var app_id = ""
-
-	endpoint := c.BuildRizhiyiURL(nil, resourceName)
+func (c *Client) GetResourceIdByName(name string, resourceNameParts ...string) (id string, err error) {
+	endpoint := c.BuildRizhiyiURL(nil, resourceNameParts...)
 	response, err := c.Get(endpoint)
 	if err != nil {
 		return "", err
@@ -200,17 +221,77 @@ func (c *Client) GetResourceIdByName(name string, resourceName string) (id strin
 	if err != nil {
 		return "", err
 	}
-	objects, ok := data["objects"].([]interface{})
-	if !ok {
+
+	// 兼容 v2 (objects, resources) 和 v3 (list)
+	var list []interface{}
+	if v, ok := data["list"].([]interface{}); ok {
+		list = v
+	} else if v, ok := data["objects"].([]interface{}); ok {
+		list = v
+	} else if v, ok := data["resources"].([]interface{}); ok {
+		list = v
+	}
+
+	if list == nil {
 		return "", nil
 	}
-	for _, obj := range objects {
-		object := obj.(map[string]interface{})
+
+	for _, item := range list {
+		object, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
 		if object["name"].(string) == name {
-			app_id = strconv.Itoa(int(object["id"].(float64)))
+			// 处理 ID 可能为 float64 或 string 的情况
+			switch v := object["id"].(type) {
+			case float64:
+				return strconv.Itoa(int(v)), nil
+			case string:
+				return v, nil
+			case int:
+				return strconv.Itoa(v), nil
+			default:
+				return fmt.Sprintf("%v", v), nil
+			}
 		}
 	}
-	return app_id, nil
+	return "", nil
+}
+
+// GetResourceById get resource detail by id
+func (c *Client) GetResourceById(id string, resourceNameParts ...string) (data map[string]interface{}, err error) {
+	endpoint := c.BuildRizhiyiURL(nil, append(resourceNameParts, id)...)
+	response, err := c.Get(endpoint)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+
+	responseBody, err := io.ReadAll(response.Body)
+	if err != nil {
+		return nil, err
+	}
+	var respData map[string]interface{}
+	err = json.Unmarshal(responseBody, &respData)
+	if err != nil {
+		return nil, err
+	}
+
+	// 兼容 v2 (包装在 object 字段中) 和 v3 (直接返回对象)
+	if object, ok := respData["object"].(map[string]interface{}); ok {
+		return object, nil
+	}
+
+	// 如果没有 object 字段，则可能直接返回了对象 (v3)
+	// 简单校验一下是否包含 id 或 name 字段
+	if _, ok := respData["id"]; ok {
+		return respData, nil
+	}
+	if _, ok := respData["name"]; ok {
+		return respData, nil
+	}
+
+	return nil, fmt.Errorf("resource not found or invalid response: %s", id)
 }
 
 // Get func

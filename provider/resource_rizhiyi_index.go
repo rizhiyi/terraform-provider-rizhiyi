@@ -4,6 +4,9 @@ import (
 	"github.com/hashicorp/terraform-plugin-sdk/helper/schema"
 	"net/url"
 	"terraform-provider-rizhiyi/yottaweb"
+	"encoding/json"
+	"io"
+	"strconv"
 )
 
 func resourceIndex() *schema.Resource {
@@ -128,81 +131,132 @@ func resourceIndex() *schema.Resource {
 func resourceIndexesCreate(d *schema.ResourceData, m interface{}) error {
 	c := m.(*yottaweb.Client)
 	pattern := d.Get("pattern").(string)
-	advanced_strategy := d.Get("advanced_strategy").(string)
 	name := d.Get("name").(string)
 	description := d.Get("description").(string)
 	disabled := d.Get("disabled").(int)
 	expired_time := d.Get("expired_time").(string)
-	freeze := d.Get("freeze").(string)
 	rotation_period := d.Get("rotation_period").(string)
-	discard_backup := d.Get("discard_backup").(string)
-	sink_to_nas := d.Get("sink_to_nas").(string)
 	number_of_replicas := d.Get("number_of_replicas").(int)
 	domain_id := d.Get("domain_id").(int)
-	sink_to_hdd := d.Get("sink_to_hdd").(string)
 	index_name_pattern := d.Get("index_name_pattern").(string)
 	discard_stored_field := d.Get("discard_stored_field").(string)
 	use_zstd_compress := d.Get("use_zstd_compress").(bool)
-	change_disabled_state := d.Get("change_disabled_state").(bool)
 	reduce_inner_fields := d.Get("reduce_inner_fields").(bool)
-	inject_reduce := d.Get("inject_reduce").(map[string]interface{})
-	tokenizer := d.Get("tokenizer").(map[string]interface{})
 
 	requestBody := map[string]interface{}{
 		"pattern":               pattern,
-		"advanced_strategy":     advanced_strategy,
 		"name":                  name,
 		"description":           description,
-		"disabled":              disabled,
-		"expired_time":          expired_time,
-		"discard_backup":        discard_backup,
-		"freeze":                freeze,
+		"disabled":              disabled != 0,
+		"expired":               expired_time,
 		"rotation_period":       rotation_period,
-		"index_name_pattern":    index_name_pattern,
-		"sink_to_nas":           sink_to_nas,
+		"number_of_replicas":    number_of_replicas,
 		"domain_id":             domain_id,
-		"sink_to_hdd":           sink_to_hdd,
+		"index_name_pattern":    index_name_pattern,
 		"discard_stored_field":  discard_stored_field,
 		"use_zstd_compress":     use_zstd_compress,
-		"number_of_replicas":    number_of_replicas,
-		"change_disabled_state": change_disabled_state,
 		"reduce_inner_fields":   reduce_inner_fields,
-		"inject_reduce":         inject_reduce,
-		"tokenizer":             tokenizer,
 	}
 
-	endpoint := c.BuildRizhiyiURL(nil, "indexinfo")
+	endpoint := c.BuildRizhiyiURL(nil, "..", "v3", "indexes")
 	resp, err := c.Post(endpoint, requestBody)
 	if err != nil {
 		return err
 	}
 
 	defer resp.Body.Close()
-	d.SetId(name)
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	var respData map[string]interface{}
+	if err := json.Unmarshal(bodyBytes, &respData); err == nil {
+		if obj, ok := respData["object"]; ok {
+			switch v := obj.(type) {
+			case float64:
+				d.SetId(strconv.Itoa(int(v)))
+			case map[string]interface{}:
+				if idv, ok := v["id"]; ok {
+					switch iv := idv.(type) {
+					case float64:
+						d.SetId(strconv.Itoa(int(iv)))
+					case string:
+						d.SetId(iv)
+					case int:
+						d.SetId(strconv.Itoa(iv))
+					default:
+						d.SetId("")
+					}
+				}
+			case string:
+				d.SetId(v)
+			}
+		}
+	}
+	if d.Id() == "" {
+		if rid, _ := c.GetResourceIdByName(name, "..", "v3", "indexes"); rid != "" {
+			d.SetId(rid)
+		}
+	}
 	return nil
 }
 
 func resourceIndexesRead(d *schema.ResourceData, m interface{}) error {
 	c := m.(*yottaweb.Client)
-	name := d.Id()
-	if name == "" {
-		if v, ok := d.GetOk("name"); ok {
-			name = v.(string)
+	id := d.Id()
+	// 如果当前 state 的 ID 是 name（非纯数字），尝试按 name 解析出数值 id
+	if id != "" {
+		if _, err := strconv.Atoi(id); err != nil {
+			if rid, _ := c.GetResourceIdByName(id, "..", "v3", "indexes"); rid != "" {
+				id = rid
+				d.SetId(id)
+			} else {
+				if v, ok := d.GetOk("name"); ok {
+					if rid2, _ := c.GetResourceIdByName(v.(string), "..", "v3", "indexes"); rid2 != "" {
+						id = rid2
+						d.SetId(id)
+					}
+				}
+			}
 		}
 	}
-	if name == "" {
+	if id == "" {
+		if v, ok := d.GetOk("name"); ok {
+			if rid, _ := c.GetResourceIdByName(v.(string), "..", "v3", "indexes"); rid != "" {
+				id = rid
+				d.SetId(id)
+			}
+		}
+	}
+	if id == "" {
 		d.SetId("")
 		return nil
 	}
 
-	appID, err := c.GetResourceIdByName(name, "indexinfo")
+	data, err := c.GetResourceById(id, "..", "v3", "indexes")
 	if err != nil {
 		return err
 	}
-	if appID == "" {
-		d.SetId("")
-		return nil
+
+	d.Set("name", data["name"])
+	d.Set("description", data["description"])
+	if disabled, ok := data["disabled"].(bool); ok {
+		if disabled {
+			d.Set("disabled", 1)
+		} else {
+			d.Set("disabled", 0)
+		}
 	}
+	d.Set("rotation_period", data["rotation_period"])
+	d.Set("expired_time", data["expired"])
+	d.Set("pattern", data["pattern"])
+	d.Set("domain_id", data["domain_id"])
+	d.Set("number_of_replicas", data["number_of_replicas"])
+	d.Set("index_name_pattern", data["index_name_pattern"])
+	d.Set("discard_stored_field", data["discard_stored_field"])
+	d.Set("use_zstd_compress", data["use_zstd_compress"])
+	d.Set("reduce_inner_fields", data["reduce_inner_fields"])
+	d.Set("freeze", data["freeze"])
+	d.Set("sink_to_nas", data["sink_to_nas"])
+	d.Set("sink_to_hdd", data["sink_to_hdd"])
+	d.Set("discard_backup", data["discard_backup"])
 
 	return nil
 }
@@ -210,51 +264,35 @@ func resourceIndexesRead(d *schema.ResourceData, m interface{}) error {
 func resourceIndexesUpdate(d *schema.ResourceData, m interface{}) error {
 	c := m.(*yottaweb.Client)
 	pattern := d.Get("pattern").(string)
-	advanced_strategy := d.Get("advanced_strategy").(string)
 	name := d.Get("name").(string)
 	description := d.Get("description").(string)
 	disabled := d.Get("disabled").(int)
 	expired_time := d.Get("expired_time").(string)
-	freeze := d.Get("freeze").(string)
 	rotation_period := d.Get("rotation_period").(string)
-	discard_backup := d.Get("discard_backup").(string)
-	sink_to_nas := d.Get("sink_to_nas").(string)
 	number_of_replicas := d.Get("number_of_replicas").(int)
 	domain_id := d.Get("domain_id").(int)
-	sink_to_hdd := d.Get("sink_to_hdd").(string)
 	index_name_pattern := d.Get("index_name_pattern").(string)
 	discard_stored_field := d.Get("discard_stored_field").(string)
 	use_zstd_compress := d.Get("use_zstd_compress").(bool)
-	change_disabled_state := d.Get("change_disabled_state").(bool)
 	reduce_inner_fields := d.Get("reduce_inner_fields").(bool)
-	inject_reduce := d.Get("inject_reduce").(map[string]interface{})
-	tokenizer := d.Get("tokenizer").(map[string]interface{})
 
 	requestBody := map[string]interface{}{
 		"pattern":               pattern,
-		"advanced_strategy":     advanced_strategy,
 		"name":                  name,
 		"description":           description,
-		"disabled":              disabled,
-		"expired_time":          expired_time,
-		"discard_backup":        discard_backup,
-		"freeze":                freeze,
+		"disabled":              disabled != 0,
+		"expired":               expired_time,
 		"rotation_period":       rotation_period,
-		"index_name_pattern":    index_name_pattern,
-		"sink_to_nas":           sink_to_nas,
+		"number_of_replicas":    number_of_replicas,
 		"domain_id":             domain_id,
-		"sink_to_hdd":           sink_to_hdd,
+		"index_name_pattern":    index_name_pattern,
 		"discard_stored_field":  discard_stored_field,
 		"use_zstd_compress":     use_zstd_compress,
-		"number_of_replicas":    number_of_replicas,
-		"change_disabled_state": change_disabled_state,
 		"reduce_inner_fields":   reduce_inner_fields,
-		"inject_reduce":         inject_reduce,
-		"tokenizer":             tokenizer,
 	}
 
-	update_id, _ := c.GetResourceIdByName(d.Id(), "indexinfo")
-	endpoint := c.BuildRizhiyiURL(nil, "indexinfo", update_id)
+	update_id := d.Id()
+	endpoint := c.BuildRizhiyiURL(nil, "..", "v3", "indexes", update_id)
 	resp, err := c.Put(endpoint, requestBody)
 	if err != nil {
 		return err
@@ -262,25 +300,19 @@ func resourceIndexesUpdate(d *schema.ResourceData, m interface{}) error {
 
 	defer resp.Body.Close()
 
-	d.SetId(name)
 	return nil
 }
 
 func resourceIndexesDelete(d *schema.ResourceData, m interface{}) error {
 	c := m.(*yottaweb.Client)
 	name := d.Get("name").(string)
-	del_id, err := c.GetResourceIdByName(name, "indexinfo")
-	if err != nil {
-		return err
-	}
+	del_id := d.Id()
 
 	// build delete index parameters
 	parametersValues := url.Values{}
 	parametersValues.Add("engine", "beaver")
-	parametersValues.Add("id", del_id)
-	parametersValues.Add("name", name)
 	parametersValues.Add("index_name", name)
-	endpoint := c.BuildRizhiyiURL(parametersValues, "indexinfo", del_id)
+	endpoint := c.BuildRizhiyiURL(parametersValues, "..", "v3", "indexes", del_id)
 
 	resp, err := c.Delete(endpoint)
 	if err != nil {
